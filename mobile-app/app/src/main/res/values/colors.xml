@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Icône de lancement (res/mipmap-anydpi-v26/ic_launcher.xml) : même
+         teinte sombre que le fond de l'écran de conduite (SmartCarTheme.kt,
+         SmartCarDarkColorScheme.background) pour une icône cohérente avec
+         l'app quel que soit le launcher/masque du fabricant. -->
+    <color name="ic_launcher_background">#0B1014</color>
+</resources>

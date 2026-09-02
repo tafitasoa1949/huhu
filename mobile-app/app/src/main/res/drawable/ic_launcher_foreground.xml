@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Même silhouette voiture que ConnectionScreen.kt (CarIcon), transposée en
+     vectoriel pour l'icône de lancement : carrosserie + habitacle + deux
+     roues, tenue dans la zone sûre 66dp du canevas adaptatif 108dp (tout
+     point reste à moins de 33dp du centre 54,54) pour ne pas être coupée par
+     un masque circulaire ou "squircle" selon le launcher. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Roues -->
+    <path
+        android:fillColor="#4DD0E1"
+        android:pathData="M34,66 A6,6 0 1,0 46,66 A6,6 0 1,0 34,66 Z" />
+    <path
+        android:fillColor="#4DD0E1"
+        android:pathData="M62,66 A6,6 0 1,0 74,66 A6,6 0 1,0 62,66 Z" />
+
+    <!-- Carrosserie -->
+    <path
+        android:fillColor="#E3F7FA"
+        android:pathData="M34,50 H74 A4,4 0 0 1 78,54 V62 A4,4 0 0 1 74,66 H34 A4,4 0 0 1 30,62 V54 A4,4 0 0 1 34,50 Z" />
+
+    <!-- Habitacle -->
+    <path
+        android:fillColor="#E3F7FA"
+        android:pathData="M46,38 H62 A6,6 0 0 1 68,44 V54 H40 V44 A6,6 0 0 1 46,38 Z" />
+</vector>

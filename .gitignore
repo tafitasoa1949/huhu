@@ -1,0 +1,55 @@
+# IntelliJ / JetBrains
+.idea/
+*.iml
+out/
+bin/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Artefacts d'installation (pip install -e .)
+*.egg-info/
+build/
+dist/
+
+# Environment variables
+.env
+.env.*
+
+# PlatformIO
+.pio/
+.vscode/
+
+# Secrets Wi-Fi ESP32-CAM (voir vehicle/esp32-cam/include/wifi_secrets.example.h)
+vehicle/esp32-cam/include/wifi_secrets.h
+
+# Gradle / Android (mobile-app/)
+.gradle/
+local.properties
+*.hprof
+captures/
+*.apk
+*.aab
+
+# Logs and recordings
+logs/
+recordings/
+
+# Videos
+vehicle/raspberry-pi/videos/*
+!vehicle/raspberry-pi/videos/.gitkeep
+
+# Machine-learning models
+*.pt
+*.onnx
+*.tflite
+
+# Operating systems
+.DS_Store
+Thumbs.db

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-car-gateway"
+version = "0.1.0"
+description = "Gateway REST — association (Phase 1) entre l'application mobile et une voiture (docs/mobile-protocol.md)."
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+smart-car-gateway = "smart_car_gateway.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

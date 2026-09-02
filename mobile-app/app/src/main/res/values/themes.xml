@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Thème d'attente minimal : tout le rendu réel passe par Compose
+         (MaterialTheme dans MainActivity), ce style ne sert qu'à la fenêtre
+         avant la première frame Compose. -->
+    <style name="Theme.SmartCarPilot" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
