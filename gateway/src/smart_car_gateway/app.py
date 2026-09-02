@@ -63,8 +63,12 @@ def create_app(registry: CarRegistry | None = None) -> Flask:
     @app.post("/api/cars/<car_id>/heartbeat")
     def heartbeat_car(car_id: str):
         reg: CarRegistry = app.config["REGISTRY"]
+        # Corps facultatif : une voiture qui ne rapporte pas `session_active`
+        # garde le comportement d'avant (voir `CarRegistry.heartbeat`).
+        body = request.get_json(silent=True) or {}
+        session_active = body.get("session_active")
         try:
-            reg.heartbeat(car_id)
+            reg.heartbeat(car_id, session_active=session_active if isinstance(session_active, bool) else None)
         except CarUnknownError:
             return jsonify({"error": f"voiture inconnue: {car_id}"}), 404
         return "", 204

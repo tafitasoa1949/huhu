@@ -150,3 +150,47 @@ def test_claim_fn_failure_does_not_mark_car_as_claimed():
     # pour un jeton qu'elle n'a jamais émis.
     with pytest.raises(RuntimeError):
         registry.claim("car-01")
+
+
+def test_heartbeat_with_active_session_keeps_the_car_claimed_past_the_initial_window():
+    # Bug observé en test manuel : le pilote roulait toujours (son jeton se
+    # prolonge à chaque paquet côté voiture), mais le Gateway libérait la
+    # voiture au bout de `expires_in_s`. Le claim suivant passait, la voiture
+    # émettait un nouveau jeton, et toutes les commandes du pilote en cours
+    # étaient rejetées en silence.
+    now = [0.0]
+    registry = make_registry(now)
+    register_car01(registry)
+    registry.claim("car-01")
+
+    now[0] = 31.0  # au-delà de expires_in_s (30 s)
+    registry.heartbeat("car-01", session_active=True)
+
+    with pytest.raises(CarAlreadyClaimedError):
+        registry.claim("car-01")
+
+
+def test_heartbeat_without_active_session_frees_the_car_immediately():
+    now = [0.0]
+    registry = make_registry(now)
+    register_car01(registry)
+    registry.claim("car-01")
+
+    now[0] = 1.0  # bien avant expires_in_s : c'est la voiture qui fait foi
+    registry.heartbeat("car-01", session_active=False)
+
+    registry.claim("car-01")  # ne doit pas lever
+
+
+def test_heartbeat_without_session_report_leaves_the_claim_untouched():
+    # Voiture qui ne rapporte pas `session_active` : comportement d'avant.
+    now = [0.0]
+    registry = make_registry(now)
+    register_car01(registry)
+    registry.claim("car-01")
+
+    now[0] = 1.0
+    registry.heartbeat("car-01")
+
+    with pytest.raises(CarAlreadyClaimedError):
+        registry.claim("car-01")

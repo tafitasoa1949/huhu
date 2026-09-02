@@ -35,11 +35,18 @@ class SimulatedMotorDriver(MotorDriver):
     def __init__(self) -> None:
         self.last_speed_pct = 0
         self.last_steering_pct = 0
+        self._last_logged: tuple[int, int] | None = None
 
     def apply(self, speed_pct: int, steering_pct: int) -> None:
         self.last_speed_pct = speed_pct
         self.last_steering_pct = steering_pct
-        print(f"[SimulatedMotorDriver] speed={speed_pct:+d}%  steering={steering_pct:+d}%")
+        # Journalisé seulement quand la consigne change : le watchdog de
+        # sécurité ré-applique l'arrêt à chaque tick (20 Hz), ce qui noyait
+        # le journal sous des lignes identiques et rendait illisible la seule
+        # chose qu'on y cherche en test manuel — la commande qui arrive.
+        if (speed_pct, steering_pct) != self._last_logged:
+            self._last_logged = (speed_pct, steering_pct)
+            print(f"[SimulatedMotorDriver] speed={speed_pct:+d}%  steering={steering_pct:+d}%")
 
     def stop(self) -> None:
         self.apply(0, 0)

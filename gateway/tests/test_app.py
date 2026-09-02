@@ -83,3 +83,26 @@ def test_heartbeat_known_car_returns_204(client):
     register_car01(client)
     response = client.post("/api/cars/car-01/heartbeat")
     assert response.status_code == 204
+
+
+def test_heartbeat_reports_active_session_and_protects_the_claim(client):
+    register_car01(client)
+    assert client.post("/api/cars/car-01/claim").status_code == 200
+
+    # La voiture signale que la session vit toujours : la voiture reste
+    # revendiquée, un second pilote ne peut pas la lui prendre.
+    assert client.post("/api/cars/car-01/heartbeat", json={"session_active": True}).status_code == 204
+    assert client.post("/api/cars/car-01/claim").status_code == 409
+
+
+def test_heartbeat_reporting_no_session_releases_the_car(client):
+    register_car01(client)
+    assert client.post("/api/cars/car-01/claim").status_code == 200
+
+    assert client.post("/api/cars/car-01/heartbeat", json={"session_active": False}).status_code == 204
+    assert client.post("/api/cars/car-01/claim").status_code == 200
+
+
+def test_heartbeat_without_body_is_still_accepted(client):
+    register_car01(client)
+    assert client.post("/api/cars/car-01/heartbeat").status_code == 204

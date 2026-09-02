@@ -49,6 +49,12 @@ class TokenStore:
             return None
         return self._token
 
+    def is_session_active(self) -> bool:
+        """Une session de pilotage vit-elle encore ? Rapporté au Gateway à
+        chaque heartbeat pour qu'il ne libère pas la voiture sous les pieds
+        du pilote en cours (voir `CarRegistry.heartbeat`)."""
+        return self.current() is not None
+
     def touch(self) -> None:
         """Prolonge l'expiration — appelé à chaque paquet P2P valide, pour
         que `expires_in_s` compte depuis le dernier trafic, pas depuis le
@@ -67,6 +73,14 @@ def _make_internal_handler(token_store: TokenStore):
                 self.send_error(404)
                 return
             token, expires_in_s = token_store.issue()
+            # Tracé : un nouveau jeton invalide immédiatement le précédent.
+            # Sans cette ligne, une session volée par un second claim est
+            # invisible dans le journal — on n'y voit que les paquets du
+            # premier pilote brutalement rejetés « jeton invalide ».
+            sys.stderr.write(
+                f"[gateway_client] nouveau jeton de session émis: {token} "
+                f"(valable {expires_in_s}s sans trafic)\n"
+            )
             body = json.dumps({"token": token, "expires_in_s": expires_in_s}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -116,17 +130,28 @@ def register(
     )
 
 
-def heartbeat_loop(*, gateway_url: str, car_id: str, stop_event: Event) -> None:
+def heartbeat_loop(
+    *,
+    gateway_url: str,
+    car_id: str,
+    stop_event: Event,
+    session_active_provider: Callable[[], bool] | None = None,
+) -> None:
     """Boucle bloquante — à lancer dans son propre fil (`threading.Thread`).
     Un heartbeat manqué n'est pas fatal : le Gateway marquera la voiture
     hors ligne après `HEARTBEAT_TIMEOUT_S`, mais aucune session P2P en cours
-    n'est affectée (Phase 2 ne dépend plus du Gateway)."""
+    n'est affectée (Phase 2 ne dépend plus du Gateway).
+
+    `session_active_provider` rapporte au Gateway si un pilote roule encore,
+    pour qu'il ne libère pas la voiture pendant la session (voir
+    `CarRegistry.heartbeat` côté Gateway)."""
     url = f"{gateway_url}/api/cars/{car_id}/heartbeat"
     while not stop_event.is_set():
         try:
-            urllib.request.urlopen(
-                urllib.request.Request(url, data=b"", method="POST"), timeout=3.0
-            ).close()
+            payload = (
+                {} if session_active_provider is None else {"session_active": session_active_provider()}
+            )
+            _post_json(url, payload)
         except (urllib.error.URLError, TimeoutError) as exc:
             sys.stderr.write(f"[gateway_client] heartbeat échoué: {exc}\n")
         stop_event.wait(HEARTBEAT_INTERVAL_S)

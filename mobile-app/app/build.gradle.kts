@@ -58,4 +58,11 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // Tests unitaires et d'intégration du module Android (`gradle
+    // :app:testDebugUnitTest`) : ils tournent sur la JVM du poste, sans
+    // émulateur — les adaptateurs testés (HTTP/UDP/TCP/MJPEG) ne touchent
+    // aucune API Android. JUnit 4 et non 5 comme dans `core` : c'est ce que
+    // le plugin Android sait exécuter sans greffon supplémentaire.
+    testImplementation("junit:junit:4.13.2")
 }

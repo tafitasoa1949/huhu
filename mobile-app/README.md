@@ -80,6 +80,22 @@ résolution du plugin `com.android.application` — c'est pour ça que `core` et
 `app` sont deux modules séparés plutôt qu'un seul : on peut travailler sur le
 protocole sans installer le SDK.
 
+```bash
+gradle :app:testDebugUnitTest   # adaptateurs réseau + intégration
+```
+
+Ces tests-là tournent sur la JVM du poste, **sans émulateur ni téléphone** :
+les adaptateurs testés (REST, UDP, TCP, MJPEG) ne touchent aucune API
+Android. Ils parlent à `testsupport/FakeCar`, une fausse voiture complète sur
+vrais sockets en boucle locale — Gateway REST, contrôle UDP, télémétrie TCP,
+relais MJPEG — équivalent Kotlin de `tools/fake_car_harness.py`, mais pilotée
+image par image par le test. Ce qui est simulé, ce sont les *conditions* :
+consommateur vidéo en retard, trame de télémétrie tronquée, silence sur la
+liaison, voiture déjà revendiquée. `PilotSessionIntegrationTest` déroule la
+chaîne complète — `GET /api/cars` → claim → joystick reçu en UDP par la
+voiture → télémétrie et vidéo remontées jusqu'à l'état observable de
+`CarPilotSession`.
+
 **Générer le wrapper Gradle** (absent du dépôt : son jar est un binaire, pas
 adapté à un premier commit écrit sans réseau) :
 
@@ -115,7 +131,10 @@ l'isolation client, fréquente sur les réseaux d'établissement).
 
 Les tests unitaires de `core` (`GatewayPort`/`CarControlPort`/`CarTelemetryPort`
 sont des interfaces, faciles à doubler) restent la référence pour tester le
-domaine/application sans réseau du tout.
+domaine/application sans réseau du tout. Ce que des doublures ne peuvent pas
+attraper — un octet mal découpé dans le flux MJPEG, un nom de champ JSON qui
+dérive du contrat, une frame jamais affichée — est couvert par les tests du
+module `app` ci-dessus, qui passent, eux, par de vrais sockets.
 
 ## Pourquoi Kotlin natif et pas Flutter
 

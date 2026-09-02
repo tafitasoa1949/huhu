@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -28,6 +29,12 @@ def _now_ms() -> int:
 
 @dataclass
 class _SessionState:
+    # `seq` est croissant "pour une session" (docs/mobile-protocol.md) : la
+    # session, c'est le jeton actif, pas la durée de vie du process. Sans
+    # `token` ici pour détecter le changement, `last_seq` ne redescendrait
+    # jamais entre deux claims, et toute reconnexion (l'app recommence à 1)
+    # se ferait rejeter indéfiniment comme "périmée".
+    token: str | None = None
     last_seq: int = -1
     last_valid_packet_monotonic: float | None = None
     applied_speed_pct: int = 0
@@ -41,7 +48,7 @@ class _ControlProtocol(asyncio.DatagramProtocol):
         self._server = server
 
     def datagram_received(self, data: bytes, addr) -> None:
-        self._server._handle_control_packet(data)
+        self._server._handle_control_packet(data, addr)
 
 
 class P2pServer:
@@ -69,6 +76,54 @@ class P2pServer:
         self._transport: asyncio.DatagramTransport | None = None
         self._telemetry_server: asyncio.base_events.Server | None = None
         self._tasks: list[asyncio.Task] = []
+        # Diagnostic uniquement : un paquet UDP invalide est silencieux par
+        # design (docs/mobile-protocol.md — pas d'accusé de réception sur ce
+        # canal), donc sans ce log il est impossible de distinguer "rien
+        # n'arrive" de "ça arrive mais c'est rejeté". Limité à 1 ligne/s par
+        # cause pour ne pas noyer la sortie à 20 Hz.
+        self._last_reject_log: dict[str, float] = {}
+        self._last_accept_log = float("-inf")
+        self._last_watchdog_log = float("-inf")
+
+    def _log_rejected(self, reason: str, packet: object = None) -> None:
+        now = self._clock()
+        last = self._last_reject_log.get(reason, float("-inf"))
+        if now - last < 1.0:
+            return
+        self._last_reject_log[reason] = now
+        print(f"[p2p_server] paquet UDP rejeté ({reason}): {packet!r}", file=sys.stderr)
+
+    def _log_accepted(self, addr, packet_type: str, seq: int, packet: dict) -> None:
+        """Pendant de [_log_rejected], sans quoi le journal ne répond pas à la
+        seule question qu'on lui pose en test manuel : « est-ce que la
+        commande du téléphone arrive ? ». Un paquet accepté joystick au
+        centre et le watchdog qui force l'arrêt produisent en effet la même
+        ligne moteur (`speed=+0%`), à la même cadence (20 Hz)."""
+        now = self._clock()
+        if now - self._last_accept_log < 1.0:
+            return
+        self._last_accept_log = now
+        source = f"{addr[0]}:{addr[1]}" if addr else "source inconnue"
+        detail = ""
+        if packet_type == "drive":
+            detail = f" speed={packet.get('speed_pct')}% steering={packet.get('steering_pct')}%"
+        elif packet_type == "mode":
+            detail = f" mode={packet.get('mode')}"
+        print(
+            f"[p2p_server] paquet accepté de {source}: {packet_type} seq={seq}{detail}",
+            file=sys.stderr,
+        )
+
+    def _log_watchdog_stop(self, reason: str, ms_since: float) -> None:
+        now = self._clock()
+        if now - self._last_watchdog_log < 1.0:
+            return
+        self._last_watchdog_log = now
+        since = "aucun depuis le démarrage" if ms_since == float("inf") else f"il y a {int(ms_since)} ms"
+        print(
+            f"[p2p_server] watchdog: arrêt forcé ({reason}) — dernier paquet valide: {since}",
+            file=sys.stderr,
+        )
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -102,28 +157,46 @@ class P2pServer:
     # Contrôle — UDP, app -> voiture
     # ------------------------------------------------------------------
 
-    def _handle_control_packet(self, data: bytes) -> None:
+    def _handle_control_packet(self, data: bytes, addr: tuple[str, int] | None = None) -> None:
         try:
             packet = json.loads(data)
         except (json.JSONDecodeError, UnicodeDecodeError):
+            self._log_rejected("JSON invalide", data)
             return
         if not isinstance(packet, dict):
+            self._log_rejected("pas un objet JSON", packet)
             return
 
         expected_token = self._token_provider()
-        if expected_token is None or packet.get("token") != expected_token:
+        if expected_token is None:
+            self._log_rejected("aucun jeton actif côté voiture")
             return
+        if packet.get("token") != expected_token:
+            self._log_rejected("jeton invalide/expiré", packet.get("token"))
+            return
+
+        # Nouveau jeton actif depuis le dernier paquet traité = nouvelle
+        # session (nouveau claim, app relancée...) : la numérotation de
+        # l'app est repartie de 1 côté client, la nôtre doit en faire autant
+        # plutôt que de comparer contre un `last_seq` hérité d'une session
+        # précédente qui n'a aucun rapport.
+        if expected_token != self._session.token:
+            self._session.token = expected_token
+            self._session.last_seq = -1
 
         seq = packet.get("seq")
         if not isinstance(seq, int) or seq <= self._session.last_seq:
+            self._log_rejected(f"seq non croissant (reçu={seq}, dernier={self._session.last_seq})")
             return
 
         packet_type = packet.get("type")
         if packet_type not in ("drive", "emergency", "mode"):
+            self._log_rejected("type inconnu", packet_type)
             return
 
         self._session.last_seq = seq
         self._on_valid_packet()
+        self._log_accepted(addr, packet_type, seq, packet)
 
         # `mode` n'est envoyé qu'une fois au clic, pas à 20 Hz : il ne doit
         # pas faire vivre le watchdog de liaison à sa place
@@ -201,6 +274,7 @@ class P2pServer:
             )
             if decision.stopped_reason is not None:
                 self._apply_decision(decision)
+                self._log_watchdog_stop(decision.stopped_reason, ms_since)
 
     # ------------------------------------------------------------------
     # Télémétrie — TCP, voiture -> app

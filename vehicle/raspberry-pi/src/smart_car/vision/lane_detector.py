@@ -114,7 +114,11 @@ class LaneDetector:
         if segments is None:
             return left, right
 
-        for x1, y1, x2, y2 in segments[:, 0]:
+        # `cv2.HoughLinesP` renvoie (N, 1, 4) jusqu'à OpenCV 4 mais (N, 4)
+        # depuis OpenCV 5 : on aplatit dans les deux cas plutôt que d'indexer
+        # une dimension intermédiaire qui n'existe pas partout (sinon le
+        # dépaquetage lève `TypeError` sur les versions récentes).
+        for x1, y1, x2, y2 in np.asarray(segments).reshape(-1, 4):
             if abs(int(y2) - int(y1)) < self._min_vertical_span_px:
                 continue  # quasi horizontal : pas une bordure de piste
             bucket = left if (int(x1) + int(x2)) / 2 < center_x else right

@@ -68,14 +68,14 @@ class MjpegVideoStreamAdapter(
                 break
             }
             // Canal HTTP/TCP, pas UDP : rien ne fait sauter les trames en
-            // retard côté transport. Si une frame suivante est déjà arrivée
-            // pendant qu'on lisait celle-ci, celle qu'on vient de décoder
-            // est déjà périmée — on ne l'affiche pas et on enchaîne
+            // retard côté transport. Si une frame *complète* est déjà
+            // arrivée pendant qu'on lisait celle-ci, celle qu'on vient de
+            // décoder est déjà périmée — on ne l'affiche pas et on enchaîne
             // directement sur la suivante, plutôt que de laisser le retard
             // s'accumuler et rejouer tout le tampon en rafale (même
             // principe que les paquets de contrôle obsolètes ignorés,
             // docs/mobile-protocol.md).
-            if (reader.hasBufferedData()) continue
+            if (reader.hasCompleteBufferedFrame()) continue
             emit(frame)
         }
     }.flowOn(Dispatchers.IO)
@@ -107,14 +107,27 @@ private class MjpegMultipartReader(private val input: InputStream) {
     }
 
     /**
-     * Signale qu'une frame plus récente attend déjà d'être lue — soit dans
-     * le reliquat qu'on a déjà tiré du flux (sur-lecture par blocs de
-     * [CHUNK_SIZE]), soit directement disponible côté OS sans bloquer.
-     * `InputStream.available()` n'est qu'une estimation, mais suffisante
-     * ici : elle sert seulement à décider si la frame qu'on vient de finir
-     * de lire vaut la peine d'être affichée, pas à dimensionner une lecture.
+     * Signale qu'une frame **complète** attend déjà dans le tampon : c'est
+     * la seule situation où celle qu'on vient de décoder est réellement
+     * périmée.
+     *
+     * Un simple `buffer.isNotEmpty() || input.available() > 0` ne convient
+     * pas : la lecture par blocs de [CHUNK_SIZE] laisse presque toujours un
+     * reliquat d'octets derrière chaque image (le début de la suivante,
+     * encore tronqué). Ce test-là était donc vrai en permanence — *toutes*
+     * les frames étaient sautées et le fond vidéo restait noir.
      */
-    fun hasBufferedData(): Boolean = buffer.isNotEmpty() || input.available() > 0
+    fun hasCompleteBufferedFrame(): Boolean {
+        val boundary = indexOf(buffer, BOUNDARY)
+        if (boundary == -1) return false
+        val headerEnd = indexOf(buffer, HEADER_END, from = boundary + BOUNDARY.size)
+        if (headerEnd == -1) return false
+        val header = String(buffer, boundary, headerEnd - boundary, Charsets.US_ASCII)
+        val matcher = CONTENT_LENGTH.matcher(header)
+        if (!matcher.find()) return false
+        val payloadStart = headerEnd + HEADER_END.size
+        return buffer.size - payloadStart >= matcher.group(1)!!.toInt()
+    }
 
     private fun fill(): Boolean {
         val chunk = ByteArray(CHUNK_SIZE)
@@ -146,9 +159,9 @@ private class MjpegMultipartReader(private val input: InputStream) {
         return data
     }
 
-    private fun indexOf(haystack: ByteArray, needle: ByteArray): Int {
-        if (needle.isEmpty() || haystack.size < needle.size) return -1
-        outer@ for (i in 0..haystack.size - needle.size) {
+    private fun indexOf(haystack: ByteArray, needle: ByteArray, from: Int = 0): Int {
+        if (needle.isEmpty() || haystack.size - from < needle.size) return -1
+        outer@ for (i in from..haystack.size - needle.size) {
             for (j in needle.indices) {
                 if (haystack[i + j] != needle[j]) continue@outer
             }

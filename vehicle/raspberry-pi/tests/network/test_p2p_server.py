@@ -151,6 +151,48 @@ async def test_watchdog_stops_after_silence_past_control_timeout(running_server)
     assert driver.calls[-1] == (0, 0)
 
 
+async def test_new_token_resets_sequence_tracking():
+    # Reproduit le bug observé en test manuel : l'app repart de seq=1 à
+    # chaque nouveau claim (nouveau jeton), mais le serveur ne doit pas
+    # comparer ça au `last_seq` d'une session précédente, sans quoi toute
+    # reconnexion se retrouve rejetée en permanence comme "périmée".
+    control_port = next(_port_counter)
+    telemetry_port = next(_port_counter)
+    driver = RecordingDriver()
+    token = ["tok-session-1"]
+    server = P2pServer(
+        driver=driver,
+        control_port=control_port,
+        telemetry_port=telemetry_port,
+        token_provider=lambda: token[0],
+    )
+    await server.start()
+    try:
+        # Première session : seq 1..3, comme une app qui vient de se connecter.
+        for seq in (1, 2, 3):
+            send_udp(
+                control_port,
+                {"type": "drive", "token": token[0], "seq": seq, "ts_ms": _wire_now_ms(), "speed_pct": 10, "steering_pct": 0},
+            )
+            await asyncio.sleep(0.02)
+        assert driver.calls[-1] == (10, 0)
+
+        # Nouveau claim : nouveau jeton, l'app côté Kotlin repart de seq=1
+        # (SequenceCounter est réinitialisé à chaque nouvelle CarPilotSession).
+        token[0] = "tok-session-2"
+        send_udp(
+            control_port,
+            {"type": "drive", "token": token[0], "seq": 1, "ts_ms": _wire_now_ms(), "speed_pct": 77, "steering_pct": -20},
+        )
+        await asyncio.sleep(0.05)
+
+        # Sans le correctif, ce paquet serait rejeté (1 <= 3) et la dernière
+        # commande appliquée resterait celle de l'ancienne session.
+        assert driver.calls[-1] == (77, -20)
+    finally:
+        await server.stop()
+
+
 async def test_telemetry_client_receives_json_lines(running_server):
     _server, driver, control_port, telemetry_port, _now, _touched = running_server
 

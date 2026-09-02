@@ -57,7 +57,12 @@ async def _run(args: argparse.Namespace) -> None:
     stop_event = threading.Event()
     threading.Thread(
         target=gateway_client.heartbeat_loop,
-        kwargs={"gateway_url": args.gateway_url, "car_id": args.car_id, "stop_event": stop_event},
+        kwargs={
+            "gateway_url": args.gateway_url,
+            "car_id": args.car_id,
+            "stop_event": stop_event,
+            "session_active_provider": token_store.is_session_active,
+        },
         daemon=True,
     ).start()
 

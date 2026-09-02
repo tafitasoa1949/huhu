@@ -85,11 +85,34 @@ class CarRegistry:
             claimed_until_ts=existing.claimed_until_ts if existing else None,
         )
 
-    def heartbeat(self, car_id: str) -> None:
+    def heartbeat(self, car_id: str, *, session_active: bool | None = None) -> None:
+        """`session_active` : ce que la voiture rapporte de sa session en cours.
+
+        La voiture est seule à savoir si un pilote roule encore — son jeton se
+        prolonge à chaque paquet valide (docs/mobile-protocol.md : « valable
+        [...] s'il n'y a pas de trafic »), pas le Gateway. Sans ce recalage, la
+        fenêtre posée au claim (`expires_in_s`) expirait au bout de 30 s alors
+        que la session vivait toujours : le claim suivant était accepté, la
+        voiture émettait un nouveau jeton, et toutes les commandes du pilote en
+        cours se faisaient rejeter en silence (l'app continuait d'afficher
+        « lié », la télémétrie n'étant pas concernée).
+
+        `None` = la voiture ne rapporte pas ce champ : on ne touche pas à la
+        revendication, exactement comme avant.
+        """
         car = self._cars.get(car_id)
         if car is None:
             raise CarUnknownError(car_id)
-        car.last_heartbeat_ts = self._clock()
+        now = self._clock()
+        car.last_heartbeat_ts = now
+        if session_active is True:
+            car.claimed_until_ts = now + HEARTBEAT_TIMEOUT_S
+        elif session_active is False:
+            # Plus de session côté voiture : elle redevient libre tout de
+            # suite, plutôt que de rester revendiquée jusqu'au bout d'une
+            # fenêtre qui ne correspond plus à rien (c'est ce qui imposait
+            # d'attendre 30 s avant de pouvoir se reconnecter).
+            car.claimed_until_ts = None
 
     def list_cars(self) -> list[tuple[CarRecord, bool]]:
         """Renvoie chaque voiture connue avec son statut `online` calculé."""
