@@ -41,6 +41,14 @@ class _SessionState:
     applied_steering_pct: int = 0
     mode: str = "MANUAL"
     telemetry_seq: int = 0
+    # Dernier paquet `drive` : horloge du téléphone (`ts_ms`) et horloge de la
+    # voiture (`self._clock()`) au moment de la réception, l'une en face de
+    # l'autre. Sert à mesurer un retard *relatif* d'un paquet au suivant
+    # (docs/mobile-protocol.md, §fraîcheur) sans jamais comparer `ts_ms` à
+    # l'horloge de la voiture en absolu — les deux horloges n'ont aucune
+    # raison d'être synchronisées (voir `_handle_drive`).
+    last_drive_ts_ms: int | None = None
+    last_drive_recv_monotonic: float | None = None
 
 
 class _ControlProtocol(asyncio.DatagramProtocol):
@@ -183,6 +191,8 @@ class P2pServer:
         if expected_token != self._session.token:
             self._session.token = expected_token
             self._session.last_seq = -1
+            self._session.last_drive_ts_ms = None
+            self._session.last_drive_recv_monotonic = None
 
         seq = packet.get("seq")
         if not isinstance(seq, int) or seq <= self._session.last_seq:
@@ -231,15 +241,49 @@ class P2pServer:
 
     def _handle_drive(self, packet: dict) -> None:
         ts_ms = packet.get("ts_ms")
-        if isinstance(ts_ms, int) and _now_ms() - ts_ms > DRIVE_STALE_MS:
-            # Paquet valide (token/seq ok, donc a bien nourri le watchdog
-            # ci-dessus) mais périmé : on ne rejoue pas une commande en
-            # retard, on attend la suivante.
-            return
+        if isinstance(ts_ms, int):
+            now_monotonic = self._clock()
+            last_ts_ms = self._session.last_drive_ts_ms
+            last_recv_monotonic = self._session.last_drive_recv_monotonic
+            if last_ts_ms is not None and last_recv_monotonic is not None:
+                # Régression corrigée ici : ce calcul comparait auparavant
+                # `ts_ms` (horloge du téléphone) à l'horloge de la voiture en
+                # absolu — exactement ce que docs/mobile-protocol.md interdit
+                # (« jamais comparé à l'horloge de la voiture »), parce que
+                # rien ne garantit que les deux horloges sont synchronisées.
+                # Sur ce banc, un écart constant d'environ 200-260 ms entre
+                # les deux faisait rejeter la quasi-totalité des paquets
+                # comme "périmés", alors qu'aucun retard réseau réel
+                # n'existait — silencieusement, avant l'ajout du journal
+                # ci-dessous : le joystick semblait ne "rien faire".
+                #
+                # Un décalage d'horloge *constant* n'affecte jamais ce
+                # calcul-ci : seul un paquet qui a mis plus de temps à
+                # arriver que ce que le téléphone pensait avoir laissé
+                # s'écouler (retard réseau/ordonnancement réel) déclenche le
+                # rejet.
+                phone_elapsed_ms = ts_ms - last_ts_ms
+                car_elapsed_ms = (now_monotonic - last_recv_monotonic) * 1000
+                network_delay_ms = car_elapsed_ms - phone_elapsed_ms
+                if network_delay_ms > DRIVE_STALE_MS:
+                    # Paquet valide (token/seq ok, donc a bien nourri le
+                    # watchdog ci-dessus) mais arrivé avec trop de retard :
+                    # on ne rejoue pas une commande périmée, on attend la
+                    # suivante. Journalisé séparément de `_log_accepted` :
+                    # sans ça, un paquet "accepté" au sens token/séquence
+                    # peut quand même ne jamais atteindre le moteur, sans
+                    # rien qui le distingue d'un paquet réellement appliqué.
+                    self._log_rejected(
+                        f"drive périmé (retard réseau ~{network_delay_ms:.0f}ms, seuil {DRIVE_STALE_MS}ms)"
+                    )
+                    return
+            self._session.last_drive_ts_ms = ts_ms
+            self._session.last_drive_recv_monotonic = now_monotonic
 
         speed_pct = packet.get("speed_pct")
         steering_pct = packet.get("steering_pct")
         if not isinstance(speed_pct, int) or not isinstance(steering_pct, int):
+            self._log_rejected("speed_pct/steering_pct absents ou non entiers", packet)
             return
 
         decision = safety.decide(

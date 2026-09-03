@@ -1,63 +1,179 @@
-"""Teste `GpioMotorDriver` sans matériel via `gpiozero.pins.mock.MockFactory`
-— aucun Raspberry Pi requis, même principe que le mode `virtual` déjà
-utilisé côté ESP32 (docs/communication-protocol.md, §8)."""
+"""Teste `GpioMotorDriver` sans matériel : une doublure d'émetteur
+d'impulsions suffit à vérifier toute la conversion `speed_pct` -> µs, qui est
+la seule chose que ce module décide. Aucun Raspberry Pi requis, même principe
+que le mode `virtual` côté ESP32 (docs/communication-protocol.md, §8).
+
+Les assertions portent sur des **microsecondes**, c'est-à-dire exactement ce
+qui part sur le fil vers l'ESC — pas sur une abstraction intermédiaire.
+"""
 
 import pytest
-from gpiozero.pins.mock import MockFactory, MockPWMPin
 
 from smart_car.config import hardware
 from smart_car.motors.gpio_driver import GpioMotorDriver
 
 
+class RecordingSender:
+    """Doublure d'émetteur : retient la dernière impulsion par broche."""
+
+    def __init__(self) -> None:
+        self.pulses: dict[int, int] = {}
+        self.frequencies: list[int] = []
+        self.closed = False
+
+    def __call__(self, pin: int, pulse_us: int, frequency_hz: int) -> None:
+        self.pulses[pin] = pulse_us
+        self.frequencies.append(frequency_hz)
+
+    def close(self) -> None:
+        self.closed = True
+
+    @property
+    def esc(self) -> int:
+        return self.pulses[hardware.ESC_PIN]
+
+    @property
+    def steering(self) -> int:
+        return self.pulses[hardware.STEERING_PIN]
+
+
 @pytest.fixture
-def driver():
-    # `MockPin` par défaut n'émule pas le PWM (`Servo` en a besoin) —
-    # `MockPWMPin` le fait, sans matériel ni Raspberry Pi.
-    factory = MockFactory(pin_class=MockPWMPin)
-    d = GpioMotorDriver(esc_pin=18, steering_pin=13, pin_factory=factory, arm=False)
-    yield d
-    d.close()
+def sender():
+    return RecordingSender()
 
 
-def test_neutral_at_startup(driver):
-    assert driver._esc.value == pytest.approx(0.0)
-    assert driver._steering.value == pytest.approx(0.0)
+@pytest.fixture
+def driver(sender):
+    return GpioMotorDriver(pulse_sender=sender, arm=False)
 
 
-def test_full_forward_maps_to_positive_one(driver):
+# ESC unidirectionnel de plage 900-1200 µs : c'est le moteur réellement
+# câblé, mesuré au banc (voir config/hardware.py — le point bas n'est pas
+# 1000 µs standard, mais 900 µs, marge de sécurité sous le seuil réel de cet
+# ESC). Comportement par défaut, donc testé tel quel sans monkeypatch.
+
+
+def test_neutral_at_startup_is_the_stop_pulse(driver, sender):
+    # Le constructeur envoie le neutre avant toute commande — c'est aussi le
+    # signal d'armement de l'ESC.
+    assert sender.esc == hardware.ESC_MIN_PULSE_US
+    assert sender.steering == 1500  # servo centré
+
+
+def test_full_forward_maps_to_the_esc_real_maximum_not_the_hobby_standard(driver, sender):
+    # Régression : 100 % envoyait 2000 µs (standard hobby générique), très
+    # au-delà de ce que cet ESC interprète — le moteur bourdonnait sans
+    # jamais tourner. Le maximum réel est 1200 µs.
     driver.apply(100, 0)
-    assert driver._esc.value == pytest.approx(1.0)
+    assert sender.esc == 1200
+    assert sender.esc == hardware.ESC_MAX_PULSE_US
 
 
-def test_full_reverse_maps_to_negative_one(driver):
+def test_zero_speed_maps_to_the_stop_pulse(driver, sender):
+    driver.apply(0, 0)
+    assert sender.esc == 900
+
+
+def test_intermediate_speeds_are_proportional_not_collapsed_to_two_levels(driver, sender):
+    # Régression : `gpiozero` tronquait le rapport cyclique à l'entier de
+    # pourcent (200 µs de pas à 50 Hz), ce qui écrasait toute la plage
+    # 900-1200 µs sur deux valeurs — le joystick devenait tout ou rien.
+    expected = {0: 900, 25: 975, 50: 1050, 75: 1125, 100: 1200}
+    for speed_pct, pulse_us in expected.items():
+        driver.apply(speed_pct, 0)
+        assert sender.esc == pulse_us, f"speed_pct={speed_pct}"
+
+
+def test_one_percent_of_joystick_still_changes_the_pulse(driver, sender):
+    driver.apply(1, 0)
+    assert sender.esc == 903
+
+
+def test_negative_speed_is_clamped_to_stop_not_sent_below_the_minimum(driver, sender):
+    # Le protocole autorise un speed_pct négatif (marche arrière, pensé pour
+    # un ESC bidirectionnel — docs/mobile-protocol.md) ; ce moteur n'en a pas.
     driver.apply(-100, 0)
-    assert driver._esc.value == pytest.approx(-1.0)
+    assert sender.esc == hardware.ESC_MIN_PULSE_US
 
 
-def test_half_speed_maps_to_half_unit(driver):
-    driver.apply(50, 0)
-    assert driver._esc.value == pytest.approx(0.5)
+def test_steering_uses_its_own_full_range_independent_of_the_esc(driver, sender):
+    # Le servo de direction est un servo hobby ordinaire : plage complète
+    # 1000-2000 µs, sans rapport avec la plage étroite de l'ESC.
+    driver.apply(0, -100)
+    assert sender.steering == 1000
+    driver.apply(0, 100)
+    assert sender.steering == 2000
+    driver.apply(0, 0)
+    assert sender.steering == 1500
 
 
-def test_steering_is_independent_of_speed(driver):
-    driver.apply(30, -70)
-    assert driver._esc.value == pytest.approx(0.3)
-    assert driver._steering.value == pytest.approx(-0.7)
+def test_speed_and_steering_are_independent(driver, sender):
+    driver.apply(50, -70)
+    assert sender.esc == 1050
+    assert sender.steering == 1150
 
 
-def test_stop_returns_both_channels_to_neutral(driver):
+def test_pulses_are_sent_at_the_configured_frequency(driver, sender):
+    driver.apply(40, 0)
+    assert set(sender.frequencies) == {hardware.PWM_FREQUENCY_HZ}
+
+
+def test_stop_returns_both_channels_to_neutral(driver, sender):
     driver.apply(80, -40)
     driver.stop()
-    assert driver._esc.value == pytest.approx(0.0)
-    assert driver._steering.value == pytest.approx(0.0)
+    assert sender.esc == 900
+    assert sender.steering == 1500
 
 
-def test_invert_flips_sign(monkeypatch):
+def test_close_does_not_touch_an_injected_sender(driver, sender):
+    # L'émetteur injecté appartient à l'appelant (les tests) : le pilote ne
+    # doit pas le fermer sous ses pieds.
+    driver.close()
+    assert sender.closed is False
+    assert sender.esc == 900
+
+
+def test_esc_invert_has_no_effect_on_a_unidirectional_esc(monkeypatch, sender):
+    # Sur un brushless, le sens de rotation se corrige en permutant deux fils
+    # de phase (docs/calibration.md), pas via le signe d'un signal qui n'a
+    # ici qu'un sens.
     monkeypatch.setattr(hardware, "ESC_INVERT", True)
-    factory = MockFactory(pin_class=MockPWMPin)
-    d = GpioMotorDriver(esc_pin=18, steering_pin=13, pin_factory=factory, arm=False)
-    try:
-        d.apply(60, 0)
-        assert d._esc.value == pytest.approx(-0.6)
-    finally:
-        d.close()
+    driver = GpioMotorDriver(pulse_sender=sender, arm=False)
+    driver.apply(60, 0)
+    assert sender.esc == 1080
+
+
+def test_steering_invert_flips_the_servo(monkeypatch, sender):
+    monkeypatch.setattr(hardware, "STEERING_INVERT", True)
+    driver = GpioMotorDriver(pulse_sender=sender, arm=False)
+    driver.apply(0, 100)
+    assert sender.steering == 1000
+
+
+class TestBidirectionalEsc:
+    """Comportement de repli si `hardware.ESC_BIDIRECTIONAL` repasse à True —
+    un futur ESC compatible marche arrière, par exemple. Pas le moteur câblé
+    aujourd'hui, mais un mode que le code doit continuer de produire
+    correctement."""
+
+    @pytest.fixture(autouse=True)
+    def bidirectional(self, monkeypatch):
+        monkeypatch.setattr(hardware, "ESC_BIDIRECTIONAL", True)
+
+    def test_neutral_at_startup_is_the_middle_of_the_range(self, sender):
+        GpioMotorDriver(pulse_sender=sender, arm=False)
+        assert sender.esc == 1050  # milieu de 900-1200
+
+    def test_full_reverse_maps_to_the_minimum(self, driver, sender):
+        driver.apply(-100, 0)
+        assert sender.esc == 900
+
+    def test_full_forward_maps_to_the_maximum(self, driver, sender):
+        driver.apply(100, 0)
+        assert sender.esc == 1200
+
+    def test_invert_flips_the_sign(self, monkeypatch, sender):
+        monkeypatch.setattr(hardware, "ESC_INVERT", True)
+        driver = GpioMotorDriver(pulse_sender=sender, arm=False)
+        driver.apply(100, 0)
+        assert sender.esc == 900

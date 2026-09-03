@@ -115,16 +115,55 @@ async def test_stale_sequence_is_ignored(running_server):
     assert driver.calls[-1] == (10, 0)
 
 
-async def test_drive_packet_older_than_150ms_is_not_applied(running_server):
-    _server, driver, control_port, _telemetry_port, _now, touched = running_server
+async def test_drive_packet_delayed_relative_to_phone_clock_is_not_applied(running_server):
+    # La fraîcheur se mesure au *retard* d'un paquet par rapport au suivant
+    # (docs/mobile-protocol.md), jamais en comparant `ts_ms` à l'horloge de
+    # la voiture en absolu — voir `test_constant_clock_offset...` ci-dessous
+    # pour la régression que ça corrige.
+    _server, driver, control_port, _telemetry_port, now, touched = running_server
 
-    old_ts = _wire_now_ms() - 500
-    send_udp(control_port, {"type": "drive", "token": "tok-123", "seq": 1, "ts_ms": old_ts, "speed_pct": 70, "steering_pct": 0})
+    # Premier paquet : rien à comparer encore, toujours appliqué.
+    send_udp(control_port, {"type": "drive", "token": "tok-123", "seq": 1, "ts_ms": 1000, "speed_pct": 10, "steering_pct": 0})
+    await asyncio.sleep(0.05)
+    assert driver.calls[-1] == (10, 0)
+
+    # Le téléphone pense que 20 ms se sont écoulées ; côté voiture, l'horloge
+    # injectée avance de 480 ms avant que ce paquet soit traité — un vrai
+    # retard réseau/ordonnancement de 460 ms, bien au-dessus du seuil (150 ms).
+    now[0] = 0.5
+    send_udp(control_port, {"type": "drive", "token": "tok-123", "seq": 2, "ts_ms": 1020, "speed_pct": 70, "steering_pct": 0})
     await asyncio.sleep(0.05)
 
-    assert driver.calls == []
+    assert driver.calls[-1] == (10, 0)  # pas rejoué : la commande précédente tient
+    assert (70, 0) not in driver.calls
     # Mais le paquet a quand même compté pour le watchdog (token/seq valides).
-    assert touched[0] == 1
+    assert touched[0] == 2
+
+
+async def test_constant_clock_offset_between_phone_and_car_never_causes_rejection(running_server):
+    # Régression : ce calcul comparait auparavant `ts_ms` (horloge du
+    # téléphone) à l'horloge de la voiture en absolu. Un simple décalage
+    # constant entre les deux (aucune synchronisation garantie entre un
+    # téléphone et un Raspberry Pi) suffisait à faire rejeter quasiment
+    # tous les paquets comme "périmés" — observé au banc : ~200-260 ms
+    # d'écart, joystick silencieusement inopérant.
+    _server, driver, control_port, _telemetry_port, now, _touched = running_server
+
+    # Horloge du téléphone très en avance sur celle de la voiture (10
+    # minutes) : un décalage constant énorme, jamais un vrai retard réseau.
+    phone_clock_offset_ms = 600_000
+    for seq, (speed_pct, elapsed_s) in enumerate(
+        [(10, 0.0), (20, 0.05), (30, 0.05), (40, 0.05)], start=1
+    ):
+        now[0] += elapsed_s
+        ts_ms = phone_clock_offset_ms + int(now[0] * 1000)
+        send_udp(
+            control_port,
+            {"type": "drive", "token": "tok-123", "seq": seq, "ts_ms": ts_ms, "speed_pct": speed_pct, "steering_pct": 0},
+        )
+        await asyncio.sleep(0.05)
+
+    assert driver.calls[-1] == (40, 0)
 
 
 async def test_emergency_forces_immediate_stop(running_server):
