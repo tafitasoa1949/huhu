@@ -126,6 +126,8 @@ class GpioMotorDriver(MotorDriver):
         self._steering_pin = steering_pin
         self._sender = pulse_sender if pulse_sender is not None else LgpioPulseSender()
         self._owns_sender = pulse_sender is None
+        # Dernière impulsion réellement émise par broche — voir `_send_pulse`.
+        self._last_pulse_us: dict[int, int] = {}
 
         # Neutre sur toutes les voies avant toute commande : pour les ESC
         # c'est aussi le signal d'armement (impulsion minimale en
@@ -145,15 +147,36 @@ class GpioMotorDriver(MotorDriver):
         # attente suffit donc à armer les deux à la fois.
         time.sleep(hardware.ESC_ARM_DURATION_S)
 
+    def _send_pulse(self, pin: int, pulse_us: int) -> None:
+        """N'émet que si la consigne a changé.
+
+        `lgpio.tx_servo` émet en boucle infinie tout seul : une fois la
+        largeur posée, le train d'impulsions continue sans qu'on y retouche.
+        Réémettre la même valeur ne sert donc à rien — et coûte cher sur un
+        servo : chaque appel relance le minutage logiciel, et la gigue qui va
+        avec. Le watchdog de sécurité appelant `apply(0, 0)` toutes les 50 ms
+        dès qu'aucune commande n'arrive, le servo se faisait re-commander
+        20 fois par seconde en permanence et ne se stabilisait jamais — il
+        chassait autour de sa position au lieu de s'y poser.
+        """
+        if self._last_pulse_us.get(pin) == pulse_us:
+            return
+        self._last_pulse_us[pin] = pulse_us
+        self._sender(pin, pulse_us, hardware.PWM_FREQUENCY_HZ)
+
     def apply(self, speed_pct: int, steering_pct: int) -> None:
         pulse_us = _esc_pulse_us(speed_pct)
-        self._sender(self._esc_pin, pulse_us, hardware.PWM_FREQUENCY_HZ)
-        self._sender(self._esc2_pin, pulse_us, hardware.PWM_FREQUENCY_HZ)
-        # Aucun servo câblé pour l'instant (hardware.STEERING_PIN = None) :
-        # rien à envoyer, plutôt que de revendiquer une broche qui n'existe
-        # pas côté matériel.
+        self._send_pulse(self._esc_pin, pulse_us)
+        self._send_pulse(self._esc2_pin, pulse_us)
+        # `steering_pin = None` : aucun servo câblé, rien à envoyer, plutôt
+        # que de revendiquer une broche qui n'existe pas côté matériel.
+        #
+        # Joystick relâché -> `steering_pct = 0` -> milieu de la plage, soit
+        # exactement la position posée au démarrage : le servo revient donc
+        # de lui-même à son point de départ, et y reste (plus de réémission
+        # tant que la consigne ne change pas).
         if self._steering_pin is not None:
-            self._sender(self._steering_pin, _steering_pulse_us(steering_pct), hardware.PWM_FREQUENCY_HZ)
+            self._send_pulse(self._steering_pin, _steering_pulse_us(steering_pct))
 
     def stop(self) -> None:
         self.apply(0, 0)

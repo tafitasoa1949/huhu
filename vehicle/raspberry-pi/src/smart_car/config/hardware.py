@@ -18,11 +18,11 @@ ESC/servo se raisonne et celle que `lgpio.tx_servo` prend directement (voir
 ESC_PIN = 12  # broche physique 32 (BCM 12) — moteur 1, câblage confirmé
 ESC2_PIN = 13  # broche physique 33 (BCM 13) — moteur 2, câblage confirmé
 
-# `None` = pas de servo de direction câblé pour l'instant : `GpioMotorDriver`
-# n'essaie alors ni de le revendiquer ni de lui envoyer d'impulsion.
-# Remettre un numéro de broche ici (ex. 18) suffira le jour où un servo sera
-# câblé — rien d'autre à changer.
-STEERING_PIN: int | None = None
+# Servo de direction — broche physique 12 (BCM 18), câblage confirmé.
+# `None` ici désactiverait proprement le canal (le pilote ne revendiquerait
+# ni ne piloterait la broche), ce qui a servi tant qu'aucun servo n'était
+# monté.
+STEERING_PIN: int | None = 18
 
 # --------------------------------------------------------------------------
 # Cadence du signal (standard hobby RC : 50 Hz, une impulsion toutes les 20 ms)
@@ -56,12 +56,13 @@ PWM_FREQUENCY_HZ = 50
 ESC_MIN_PULSE_US = 900  # arrêt / neutre d'armement — marge sous le seuil réel de l'ESC
 ESC_MAX_PULSE_US = 1200  # plein régime avant
 
-# Le servo de direction, lui, serait un servo hobby ordinaire : plage
-# complète, centré au milieu. Rien à voir avec la plage étroite de l'ESC
-# ci-dessus. Conservé pour le jour où STEERING_PIN sera à nouveau câblé —
-# ignoré tant qu'il vaut None.
-STEERING_MIN_PULSE_US = 1000  # butée gauche
-STEERING_MAX_PULSE_US = 2000  # butée droite
+# Le servo de direction a sa propre plage, plus large que le standard hobby
+# 1000-2000 µs et sans rapport avec la plage étroite des ESC ci-dessus :
+# 500-2300 µs, mesuré au banc (essai `AngularServo(18,
+# min_pulse_width=0.0005, max_pulse_width=0.0023)`, débattement complet
+# -90°/+90° vérifié). Le centre tombe donc à 1400 µs, pas 1500.
+STEERING_MIN_PULSE_US = 500  # butée d'un côté (steering_pct = -100)
+STEERING_MAX_PULSE_US = 2300  # butée de l'autre (steering_pct = +100)
 
 # --------------------------------------------------------------------------
 # Sens de rotation / de braquage
@@ -74,6 +75,12 @@ STEERING_MAX_PULSE_US = 2000  # butée droite
 # tandem sur la même commande de vitesse (voir `motors/gpio_driver.py`), pas
 # de mélange différentiel gauche/droite indépendant ici.
 ESC_INVERT = False
+
+# `steering_pct` négatif = gauche, positif = droite (docs/contracts.md).
+# Quel côté physique correspond à l'impulsion minimale dépend du montage du
+# palonnier et du sens de la tringlerie — impossible à deviner depuis le
+# code. Si le servo braque à droite quand le joystick va à gauche, basculer
+# ce réglage à True plutôt que de démonter quoi que ce soit.
 STEERING_INVERT = False
 
 # --------------------------------------------------------------------------
@@ -103,3 +110,44 @@ ESC_BIDIRECTIONAL = False
 # confirmer au premier essai réel (même philosophie que docs/calibration.md :
 # un point qui ne se devine pas, isolé dans un seul endroit facile à corriger).
 ESC_ARM_DURATION_S = 2.0
+
+# --------------------------------------------------------------------------
+# Accéléromètre ADXL345 — bus I2C
+# --------------------------------------------------------------------------
+# Câblage confirmé : SDA sur la broche physique 3 (BCM 2), SCL sur la broche
+# physique 5 (BCM 3). Ces deux broches-là *sont* le bus I2C matériel n°1 du
+# Raspberry Pi — elles ne se configurent pas broche par broche comme un GPIO
+# ordinaire, d'où un numéro de bus ici plutôt que deux numéros de broche : le
+# noyau expose l'ensemble sous `/dev/i2c-1`, et c'est ce fichier que le
+# pilote ouvre.
+I2C_BUS = 1
+
+# 0x53 quand la broche SDO du module est à la masse (le montage habituel des
+# cartes de rupture, et ce que `i2cdetect -y 1` voit ici). SDO au 3V3
+# déplacerait le composant à 0x1D.
+ADXL345_I2C_ADDRESS = 0x53
+
+# Fréquence d'échantillonnage interne du capteur (registre BW_RATE). 100 Hz
+# est le réglage par défaut du composant et large devant la seconde
+# d'affichage : chaque lecture tombe sur une mesure fraîche, jamais sur la
+# même que la précédente.
+ADXL345_OUTPUT_RATE_HZ = 100
+
+# Sensibilité, en comptes par g. La fiche technique d'un ADXL345 authentique
+# annonce 256 (3,9 mg par compte) et cette valeur ne dépend ni de la plage ni
+# de la cadence — voir `sensors/adxl345.py`.
+#
+# **L'exemplaire câblé ici n'est pas conforme** : au repos, ses trois axes
+# donnent une norme de ~359,5 comptes là où la gravité devrait en donner 256
+# (mesuré sur 30 échantillons moyennés, registres d'offset OFSX/Y/Z tous à 0,
+# FULL_RES actif, résultat identique sur les quatre plages). C'est le
+# comportement connu des copies d'ADXL345, qui répondent pourtant 0xE5 au
+# registre DEVID comme les vraies. Avec 256 ici, l'affichage indiquerait
+# 13,8 m/s² pour une voiture posée à plat sur une table.
+#
+# 359,5 est une estimation en un seul point : elle suppose que le biais du
+# capteur à 0 g est négligeable. Pour la vérifier axe par axe, poser le
+# module sur chacune de ses six faces et relever les comptes ; pour un axe
+# donné, `sensibilité = (compte_face_haut - compte_face_bas) / 2` et
+# `biais = (compte_face_haut + compte_face_bas) / 2`.
+ADXL345_COUNTS_PER_G = 359.5

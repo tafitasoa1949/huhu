@@ -10,9 +10,9 @@ qui part sur le fil vers l'ESC — pas sur une abstraction intermédiaire.
 import pytest
 
 from smart_car.config import hardware
-from smart_car.motors.gpio_driver import GpioMotorDriver
+from smart_car.motors.gpio_driver import GpioMotorDriver, _esc_pulse_us
 
-STEERING_PIN_FOR_TEST = 18  # hardware.STEERING_PIN vaut None par défaut (pas de servo câblé)
+STEERING_PIN_FOR_TEST = hardware.STEERING_PIN  # GPIO18, servo de direction câblé
 
 
 class RecordingSender:
@@ -61,9 +61,8 @@ def driver(sender):
 # 1000 µs standard, mais 900 µs, marge de sécurité sous le seuil réel de cet
 # ESC). Comportement par défaut, donc testé tel quel sans monkeypatch.
 #
-# Pas de servo de direction câblé par défaut (hardware.STEERING_PIN = None) :
-# les tests qui portent sur la direction injectent explicitement
-# `steering_pin=STEERING_PIN_FOR_TEST`.
+# Le servo de direction a sa propre plage, 500-2300 µs (mesurée au banc), donc
+# un centre à 1400 µs — pas 1500. Sans rapport avec la plage des ESC.
 
 
 def test_neutral_at_startup_is_the_stop_pulse_on_both_motors(driver, sender):
@@ -120,33 +119,67 @@ def test_negative_speed_is_clamped_to_stop_not_sent_below_the_minimum(driver, se
     assert sender.esc2 == hardware.ESC_MIN_PULSE_US
 
 
-def test_no_steering_pin_configured_means_nothing_is_sent_for_steering(driver, sender):
-    # hardware.STEERING_PIN vaut None : aucun servo câblé pour l'instant. Le
-    # pilote ne doit revendiquer/piloter aucune broche pour la direction.
+def test_no_steering_pin_configured_means_nothing_is_sent_for_steering(sender):
+    # `steering_pin=None` (aucun servo câblé) : le pilote ne doit revendiquer
+    # ni piloter aucune broche pour la direction. C'était la configuration
+    # réelle avant le montage du servo, et ça doit rester propre.
+    driver = GpioMotorDriver(pulse_sender=sender, steering_pin=None, arm=False)
     driver.apply(0, 100)
-    assert STEERING_PIN_FOR_TEST not in sender.pulses
     assert set(sender.pulses) == {hardware.ESC_PIN, hardware.ESC2_PIN}
 
 
-def test_steering_uses_its_own_full_range_independent_of_the_esc(sender):
-    # Le servo de direction est un servo hobby ordinaire : plage complète
-    # 1000-2000 µs, sans rapport avec la plage étroite de l'ESC. Broche
-    # explicite : hardware.STEERING_PIN vaut None par défaut.
-    driver = GpioMotorDriver(pulse_sender=sender, steering_pin=STEERING_PIN_FOR_TEST, arm=False)
+def test_steering_uses_its_own_full_range_independent_of_the_esc(driver, sender):
+    # Plage propre au servo (500-2300 µs), sans rapport avec la plage étroite
+    # des ESC. Gauche = négatif, droite = positif (docs/contracts.md).
     driver.apply(0, -100)
-    assert sender.steering == 1000
+    assert sender.steering == 500
     driver.apply(0, 100)
-    assert sender.steering == 2000
+    assert sender.steering == 2300
     driver.apply(0, 0)
-    assert sender.steering == 1500
+    assert sender.steering == 1400  # centre = milieu de 500-2300, pas 1500
 
 
-def test_speed_and_steering_are_independent(sender):
-    driver = GpioMotorDriver(pulse_sender=sender, steering_pin=STEERING_PIN_FOR_TEST, arm=False)
+def test_speed_and_steering_are_independent(driver, sender):
     driver.apply(50, -70)
     assert sender.esc == 1050
     assert sender.esc2 == 1050
-    assert sender.steering == 1150
+    assert sender.steering == 770
+
+
+def test_an_unchanged_command_is_not_re_sent(driver, sender):
+    # Régression : le watchdog de sécurité appelle `apply(0, 0)` toutes les
+    # 50 ms dès qu'aucune commande n'arrive. Chaque réémission relançait le
+    # minutage logiciel du signal ; le servo, re-commandé 20 fois par
+    # seconde, chassait en permanence au lieu de se poser.
+    driver.apply(40, 25)
+    sender.call_order.clear()
+
+    for _ in range(10):
+        driver.apply(40, 25)
+
+    assert sender.call_order == []
+
+
+def test_a_changed_command_is_sent_again(driver, sender):
+    driver.apply(40, 25)
+    sender.call_order.clear()
+
+    driver.apply(41, 25)  # vitesse seule modifiée
+
+    assert sender.call_order == [hardware.ESC_PIN, hardware.ESC2_PIN]
+    assert sender.esc == _esc_pulse_us(41)
+
+
+def test_releasing_the_steering_joystick_returns_the_servo_to_centre(driver, sender):
+    # Manche relâché -> steering_pct = 0 -> milieu de plage, c'est-à-dire la
+    # position posée au démarrage. Le servo revient à son point de départ.
+    centre_us = sender.steering
+    driver.apply(0, 100)
+    assert sender.steering == 2300
+
+    driver.apply(0, 0)
+    assert sender.steering == 1400
+    assert sender.steering == centre_us
 
 
 def test_pulses_are_sent_at_the_configured_frequency(driver, sender):
@@ -154,13 +187,12 @@ def test_pulses_are_sent_at_the_configured_frequency(driver, sender):
     assert set(sender.frequencies) == {hardware.PWM_FREQUENCY_HZ}
 
 
-def test_stop_returns_every_channel_to_neutral(sender):
-    driver = GpioMotorDriver(pulse_sender=sender, steering_pin=STEERING_PIN_FOR_TEST, arm=False)
+def test_stop_returns_every_channel_to_neutral(driver, sender):
     driver.apply(80, -40)
     driver.stop()
     assert sender.esc == 900
     assert sender.esc2 == 900
-    assert sender.steering == 1500
+    assert sender.steering == 1400  # roues droites
 
 
 def test_close_does_not_touch_an_injected_sender(driver, sender):
@@ -184,10 +216,13 @@ def test_esc_invert_has_no_effect_on_a_unidirectional_esc(monkeypatch, sender):
 
 
 def test_steering_invert_flips_the_servo(monkeypatch, sender):
+    # Le côté physique qui correspond à l'impulsion minimale dépend du
+    # montage du palonnier : ce réglage est là pour le corriger sans
+    # démonter (voir config/hardware.py, STEERING_INVERT).
     monkeypatch.setattr(hardware, "STEERING_INVERT", True)
-    driver = GpioMotorDriver(pulse_sender=sender, steering_pin=STEERING_PIN_FOR_TEST, arm=False)
+    driver = GpioMotorDriver(pulse_sender=sender, arm=False)
     driver.apply(0, 100)
-    assert sender.steering == 1000
+    assert sender.steering == 500
 
 
 class TestBidirectionalEsc:
